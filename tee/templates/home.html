@@ -1,0 +1,315 @@
+<!-- templates/home.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Distributed Text-to-Image Retrieval</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 800px; margin: auto; }
+        input[type=text] {
+            width: 100%; padding: 12px; margin: 8px 0; box-sizing: border-box;
+        }
+        input[type=submit] {
+            padding: 12px 20px; background-color: #4CAF50; color: white;
+            border: none; cursor: pointer;
+        }
+        input[type=submit]:hover {
+            background-color: #45a049;
+        }
+        .image-container { margin-top: 20px; display: flex; gap: 20px; flex-wrap: wrap; }
+        .image-container img {
+            max-width: 200px; height: auto; border: 1px solid #ddd;
+            border-radius: 4px; padding: 5px;
+        }
+        .error { color: red; margin-top: 20px; }
+        .attestation-result { margin-top: 20px; padding: 10px; border: 1px solid #ccc; border-radius: 5px; }
+    </style>
+    <script>
+        let AES_KEY = null; // To store the fetched AES key
+
+        // Convert hex key to ArrayBuffer
+        function hexToArrayBuffer(hex) {
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+            }
+            return bytes.buffer;
+        }
+
+        // Fetch AES key from the server
+        async function fetchAESKey() {
+            try {
+                const response = await fetch('/get_aes_key', {
+                    method: 'GET',
+                    credentials: 'include' // Include cookies if authentication is used
+                });
+                if (!response.ok) {
+                    throw new Error(`Server responded with status ${response.status}`);
+                }
+                const data = await response.json();
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                const keyHex = data.aes_key;
+                AES_KEY = hexToArrayBuffer(keyHex);
+                console.log("[Client] AES Key fetched successfully.");
+            } catch (err) {
+                console.error("[Client] Failed to fetch AES Key:", err);
+                alert("Failed to initialize encryption. Please try again later.");
+            }
+        }
+
+        // Encrypt text using AES-GCM
+        async function encryptText(plainText) {
+            if (!window.crypto || !window.crypto.subtle) {
+                alert("Your browser does not support the Web Crypto API.");
+                return null;
+            }
+            if (!AES_KEY) {
+                alert("Encryption key not initialized.");
+                return null;
+            }
+            try {
+                const key = await window.crypto.subtle.importKey(
+                    'raw',
+                    AES_KEY,
+                    { name: 'AES-GCM' },
+                    false,
+                    ['encrypt']
+                );
+
+                const nonce = window.crypto.getRandomValues(new Uint8Array(12));
+                const encoder = new TextEncoder();
+                const encodedText = encoder.encode(plainText);
+
+                const ciphertext = await window.crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: nonce },
+                    key,
+                    encodedText
+                );
+
+                // Combine nonce + ciphertext
+                const combined = new Uint8Array(nonce.length + ciphertext.byteLength);
+                combined.set(nonce, 0);
+                combined.set(new Uint8Array(ciphertext), nonce.length);
+
+                // Base64 encode
+                const base64Ciphertext = btoa(String.fromCharCode(...combined));
+                console.log("[Client] Encrypted Text:", base64Ciphertext);
+                return base64Ciphertext;
+            } catch (err) {
+                console.error("[Client] Encrypt text failed:", err);
+                return null;
+            }
+        }
+
+        // Decrypt image using AES-GCM
+        async function decryptImage(base64EncryptedImage) {
+            if (!AES_KEY) {
+                console.error("[Client] AES Key not initialized.");
+                return null;
+            }
+            try {
+                const key = await window.crypto.subtle.importKey(
+                    'raw',
+                    AES_KEY,
+                    { name: 'AES-GCM' },
+                    false,
+                    ['decrypt']
+                );
+
+                const encryptedBytes = Uint8Array.from(atob(base64EncryptedImage), c => c.charCodeAt(0));
+                const nonce = encryptedBytes.slice(0, 12);
+                const ciphertext = encryptedBytes.slice(12);
+
+                const decrypted = await window.crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: nonce },
+                    key,
+                    ciphertext
+                );
+
+                // Convert decrypted data -> Blob -> Object URL
+                const byteArray = new Uint8Array(decrypted);
+                const blob = new Blob([byteArray], { type: 'image/png' }); // Adjust MIME type as needed
+                const imageUrl = URL.createObjectURL(blob);
+                console.log("[Client] Decrypted an image successfully!");
+                return imageUrl;
+            } catch (err) {
+                console.error("[Client] Decrypt image failed:", err);
+                return null;
+            }
+        }
+
+        // Call Attest API
+        async function callAttestAPI() {
+            try {
+                const response = await fetch('/attest', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.details || `Attestation failed with status ${response.status}`);
+                }
+                const data = await response.json();
+                displayAttestationResult(data);
+                console.log("[Client] Attestation successful.");
+                return data; // Return attestation data for further use if needed
+            } catch (err) {
+                console.error("[Client] Attestation failed:", err);
+                alert(`Attestation failed: ${err.message}`);
+                return null;
+            }
+        }
+
+        // Display Attestation Result
+        function displayAttestationResult(data) {
+            const attestDiv = document.getElementById('attestation-result-page');
+            if (attestDiv) {
+                attestDiv.style.display = 'block';
+                attestDiv.innerHTML = `
+                    <h3>Attestation Result:</h3>
+                    <p><strong>Status:</strong> ${data.status || 'Unknown'}</p>
+                    <p><strong>Details:</strong> ${data.details || 'No details provided.'}</p>
+                    <p><strong>Attestation Time:</strong> ${data.attest_time || 'N/A'}</p>
+                `;
+            }
+        }
+
+        // On form submit: encrypt the user's input text and call attest
+        async function handleSubmitText(event) {
+            event.preventDefault();
+            const textInput = document.getElementById('text');
+            const plaintext = textInput.value;
+            if (!plaintext) {
+                alert("Please enter some text.");
+                return;
+            }
+
+            // Call Attest API before proceeding
+            const attestationData = await callAttestAPI();
+            if (!attestationData || attestationData.status !== 'Success') {
+                return; // Stop submission if attestation fails
+            }
+
+            const encryptedText = await encryptText(plaintext);
+            if (!encryptedText) {
+                alert("Text encryption failed. Please try again.");
+                return;
+            }
+
+            // Replace the plaintext with encrypted text
+            const form = event.target;
+            // Remove existing hidden input if any
+            const existingHidden = document.getElementById('encrypted-text-input');
+            if (existingHidden) {
+                form.removeChild(existingHidden);
+            }
+            const encryptedInput = document.createElement('input');
+            encryptedInput.type = 'hidden';
+            encryptedInput.name = 'text'
+            encryptedInput.id = 'encrypted-text-input';
+            encryptedInput.value = encryptedText;
+            form.appendChild(encryptedInput);
+
+            // Optionally, include attestation data as hidden inputs
+            /*
+            const attestInput = document.createElement('input');
+            attestInput.type = 'hidden';
+            attestInput.name = 'attest_status';
+            attestInput.value = attestationData.status;
+            form.appendChild(attestInput);
+
+            const detailsInput = document.createElement('input');
+            detailsInput.type = 'hidden';
+            detailsInput.name = 'attest_details';
+            detailsInput.value = attestationData.details;
+            form.appendChild(detailsInput);
+            */
+
+            // Clear the text input to prevent sending the raw text
+            textInput.value = '';
+
+            // Submit the form
+            form.submit();
+        }
+
+        // Automatically decrypt images upon page load
+        async function decryptAllImages() {
+            const encryptedImgs = document.querySelectorAll('.encrypted-img');
+            for (let img of encryptedImgs) {
+                const encryptedData = img.getAttribute('data-encrypted');
+                const decryptedURL = await decryptImage(encryptedData);
+                if (decryptedURL) {
+                    img.src = decryptedURL;
+                } else {
+                    img.alt = "Decryption Failed";
+                }
+            }
+        }
+
+        window.onload = async function() {
+            // Fetch the AES key from the server
+            await fetchAESKey();
+
+            const form = document.getElementById('text-form');
+            if (form) {
+                form.addEventListener('submit', handleSubmitText);
+            }
+
+            // If images are present, decrypt them automatically
+            const imagesSection = document.getElementById('images-section');
+            if (imagesSection) {
+                decryptAllImages();
+            }
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Text-to-Image Retrieval (Distributed)</h1>
+        <!-- Form: user input text -->
+        <form id="text-form" action="{{ url_for('get_image') }}" method="post">
+            <label for="text">Enter your text:</label>
+            <input type="text" id="text" name="text" required>
+            <input type="submit" value="Submit">
+        </form>
+
+        <!-- Attestation Result Section (Shown after attestation) -->
+        {% if attestation_result %}
+            <div id="attestation-result-page" class="attestation-result" style="display: block;">
+                <h3>Attestation Result:</h3>
+                <p><strong>Status:</strong> {{ attestation_result.status }}</p>
+                <p><strong>Details:</strong> {{ attestation_result.details }}</p>
+                <p><strong>Attestation Time:</strong> {{ attestation_result.attest_time }}</p>
+            </div>
+        {% else %}
+            <div id="attestation-result-page" class="attestation-result" style="display: none;">
+                <!-- This div will be populated by JavaScript after attestation -->
+            </div>
+        {% endif %}
+
+        {% if images %}
+            <!-- We wrap images in a section to automatically decrypt them on load -->
+            <div id="images-section">
+                <h2>Top-{{ images|length }} Retrieved Images (Encrypted)</h2>
+                <div class="image-container">
+                    {% for enc_img in images %}
+                        <!-- Each image is encrypted with AES-GCM; store it in data attribute -->
+                        <img class="encrypted-img"
+                             data-encrypted="{{ enc_img }}"
+                             src=""  <!-- Will be set after decryption -->
+                        >
+                    {% endfor %}
+                </div>
+            </div>
+        {% endif %}
+
+        {% if error %}
+            <div class="error">
+                <p>{{ error }}</p>
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>

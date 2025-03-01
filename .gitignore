@@ -148,3 +148,7 @@ core.*
 
 # Allow
 !src/evaluation/misc/results_dbs/*
+
+keys/*.pt
+database/valid_imgs.tsv
+data/pretrained_weights

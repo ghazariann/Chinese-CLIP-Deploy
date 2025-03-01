@@ -1,0 +1,52 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "dist",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/t2i_app_dist_enc.py",
+            "env": {
+                "FLASK_APP": "app_dist.py",
+                "FLASK_ENV": "development"
+            },
+            "python": "/home/ubuntu/ST-main/myenv/bin/python",
+            "args": [],
+            "jinja": true,
+            "justMyCode": true,
+            "console": "integratedTerminal",
+            // "preLaunchTask": "sudo /home/ubuntu/ST-main/myenv/bin/python ${workspaceFolder}/app_dist.py"
+        },
+        {
+            "name": "i2i_dist",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/i2i_app_dist_enc.py",
+            "env": {
+                "FLASK_APP": "i2i_app_dist_enc.py",
+                "FLASK_ENV": "development"
+            },
+            "python": "/home/ubuntu/ST-main/myenv/bin/python",
+            "args": [],
+            "jinja": true,
+            "justMyCode": true,
+            "console": "integratedTerminal",
+            // "preLaunchTask": "sudo /home/ubuntu/ST-main/myenv/bin/python ${workspaceFolder}/app_dist.py"
+        },
+        {
+            "name": "Python: Flask (app.py)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/app.py",
+            "env": {
+                "FLASK_APP": "app.py",
+                "FLASK_ENV": "development"
+            },
+            "python": "/home/ubuntu/ST-main/myenv/bin/python",  // Replace with your actual path
+            "args": [],
+            "jinja": true,
+            "justMyCode": true,
+            "console": "integratedTerminal"
+        }
+    ]
+}

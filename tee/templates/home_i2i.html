@@ -1,0 +1,511 @@
+<!-- templates/home_i2i.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Distributed Image-to-Image Retrieval</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background-color: #f0f2f5; }
+        .container { max-width: 900px; margin: auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        input[type=file] {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        input[type=submit] {
+            padding: 12px 20px; 
+            background-color: #4CAF50; 
+            color: white;
+            border: none; 
+            cursor: pointer; 
+            border-radius: 4px; 
+            font-size: 16px;
+        }
+        input[type=submit]:hover {
+            background-color: #45a049;
+        }
+        .image-container { margin-top: 20px; display: flex; gap: 20px; flex-wrap: wrap; }
+        .image-container img {
+            max-width: 30%; 
+            height: auto; 
+            border: 1px solid #ddd;
+            border-radius: 4px; 
+            padding: 5px; 
+            transition: transform 0.2s;
+        }
+        .image-container img:hover {
+            transform: scale(1.05);
+        }
+        .error { color: red; margin-top: 20px; }
+        .attestation-result { margin-top: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; background-color: #fafafa; }
+        .attestation-result h3 { margin-top: 0; }
+        .logs-section { margin-top: 30px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; background-color: #fafafa; }
+        .logs-section h3 { margin-top: 0; }
+        .v-sign { color: green; font-weight: bold; }
+        .x-sign { color: red; font-weight: bold; }
+        pre { background-color: #eee; padding: 10px; border-radius: 4px; max-height: 300px; overflow-y: scroll; }
+        #log-container { height: 300px; overflow-y: scroll; background-color: #fff; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+    </style>
+    <script>
+        const HARD_CODED_PASSWORD_HASH = "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4"; // SHA256 hash of '1234'
+
+           // Function to prompt user for password and compare it with hardcoded hash
+        async function authenticateUser() {
+            const password = prompt("请输入密码：");
+
+            // If the user cancels, or doesn't enter anything, deny access
+            if (!password) {
+                alert("需要密码");
+                return false;
+            }
+
+            // Hash the entered password and log the result immediately
+            const enteredPasswordHash = await hashPassword(password);
+            // console.log("Entered password hash: ", enteredPasswordHash);
+
+            // Compare the entered password hash with the hardcoded hash
+            if (enteredPasswordHash === HARD_CODED_PASSWORD_HASH) {
+                alert("认证成功");
+                return true;  // Allow access
+            } else {
+                alert("密码不正确。请重试");
+                return false;  // Deny access
+            }
+        }
+
+        // Simple SHA256 hashing function
+        async function hashPassword(password) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(password);
+            const buffer = await crypto.subtle.digest('SHA-256', data);
+            const hashArray = Array.from(new Uint8Array(buffer));
+            const hashHex = hashArray.map(byte => byte.toString(16).padStart(2, '0')).join('');
+            return hashHex; // Return the hex string of the hash
+        }
+    
+      
+        let AES_KEY = null; // To store the fetched AES key
+
+        // Convert hex key to ArrayBuffer
+        function hexToArrayBuffer(hex) {
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+            }
+            return bytes.buffer;
+        }
+
+        // Fetch AES key from the server
+        async function fetchAESKey() {
+            try {
+                const response = await fetch('/get_aes_key', {
+                    method: 'GET',
+                    credentials: 'include' // Include cookies if authentication is used
+                });
+                if (!response.ok) {
+                    throw new Error(`Server responded with status ${response.status}`);
+                }
+                const data = await response.json();
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                const keyHex = data.aes_key;
+                AES_KEY = hexToArrayBuffer(keyHex);
+            } catch (err) {
+                loggerClientError(`Failed to fetch AES Key: ${err.message}`);
+                displayError("Failed to initialize encryption. Please try again later.");
+            }
+        }
+
+        // Encrypt image using AES-GCM
+        async function encryptImage(file) {
+            if (!window.crypto || !window.crypto.subtle) {
+                alert("Your browser does not support the Web Crypto API.");
+                return null;
+            }
+            if (!AES_KEY) {
+                alert("Encryption key not initialized.");
+                return null;
+            }
+            try {
+                const key = await window.crypto.subtle.importKey(
+                    'raw',
+                    AES_KEY,
+                    { name: 'AES-GCM' },
+                    false,
+                    ['encrypt']
+                );
+
+                const nonce = window.crypto.getRandomValues(new Uint8Array(12));
+                const arrayBuffer = await file.arrayBuffer();
+
+                const ciphertext = await window.crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: nonce },
+                    key,
+                    arrayBuffer
+                );
+
+                // Combine nonce + ciphertext
+                const combined = new Uint8Array(nonce.length + ciphertext.byteLength);
+                combined.set(nonce, 0);
+                combined.set(new Uint8Array(ciphertext), nonce.length);
+
+                // Base64 encode
+                const base64Ciphertext = btoa(String.fromCharCode(...combined));
+                return base64Ciphertext;
+            } catch (err) {
+                loggerClientError(`Encrypt image failed: ${err.message}`);
+                return null;
+            }
+        }
+
+        // Decrypt image using AES-GCM
+        async function decryptImage(base64EncryptedImage) {
+            if (!AES_KEY) {
+                console.error("[Client] AES Key not initialized.");
+                return null;
+            }
+            try {
+                const key = await window.crypto.subtle.importKey(
+                    'raw',
+                    AES_KEY,
+                    { name: 'AES-GCM' },
+                    false,
+                    ['decrypt']
+                );
+
+                const encryptedBytes = Uint8Array.from(atob(base64EncryptedImage), c => c.charCodeAt(0));
+                const nonce = encryptedBytes.slice(0, 12);
+                const ciphertext = encryptedBytes.slice(12);
+
+                const decrypted = await window.crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: nonce },
+                    key,
+                    ciphertext
+                );
+
+                // Convert decrypted data -> Blob -> Object URL
+                const byteArray = new Uint8Array(decrypted);
+                const blob = new Blob([byteArray], { type: 'image/png' }); // Adjust MIME type as needed
+                const imageUrl = URL.createObjectURL(blob);
+                return imageUrl;
+            } catch (err) {
+                loggerClientError(`Decrypt image failed: ${err.message}`);
+                return null;
+            }
+        }
+
+        // Call Attest API
+        async function callAttestAPI() {
+            try {
+                <!-- loggerClient("Initiating attestation process."); -->
+                const response = await fetch('/attest', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.details || `Attestation failed with status ${response.status}`);
+                }
+                const data = await response.json();
+                displayAttestationResult(data);
+                return data; // Return attestation data for further use if needed
+            } catch (err) {
+                loggerClientError(`Attestation failed: ${err.message}`);
+                displayError(`Attestation failed: ${err.message}`);
+                return null;
+            }
+        }
+
+        // Display Attestation Result
+        function displayAttestationResult(data) {
+            const attestDiv = document.getElementById('attestation-result-page');
+            if (attestDiv) {
+                attestDiv.style.display = 'block';
+                let statusClass = data.status === '成功' ? 'v-sign' : 'x-sign';
+                let statusIcon = data.status === '成功' ? '✅' : '❌';
+                let res = "报告的TCB引导加载程序与证书匹配的证明报告相符。\n报告的TCB TEE与证书匹配的证明报告相符。\n报告的TCB SNP与证书匹配的证明报告相符。\n 报告的TCB 微代码与证书匹配的证明报告相符。\nVEK签署了证明报告。"
+                attestDiv.innerHTML = `
+                    <h3>远程证明: <span class="${statusClass}">${statusIcon} ${data.status}</span></h3>
+                    <p><strong>状态:</strong> ${res || 'No details provided.'}</p>
+                    <p><strong>证明时间:</strong> ${data.attest_time || 'N/A'}</p>
+                `;
+            }
+        }
+
+        // Display Error Messages in UI
+        function displayError(message) {
+            const errorDiv = document.getElementById('error-message');
+            if (errorDiv) {
+                errorDiv.style.display = 'block';
+                errorDiv.querySelector('p').textContent = message;
+            }
+        }
+
+        // Initialize SSE for log streaming
+        function initLogStream() {
+            const logContainer = document.getElementById('log-container');
+            if (!logContainer) return;
+
+            const eventSource = new EventSource('/logs-stream');
+
+            eventSource.onmessage = function(event) {
+                const logLine = event.data.trim();
+                if (!logLine) return;
+
+                const logElement = document.createElement('div');
+
+                // Check if the log is from TEE (Server)
+                let emoji = ''; // Default empty emoji
+
+                     if (logLine.startsWith('[数据库]')) {
+                    emoji = '🗄️'; // Database emoji
+                } else if (logLine.startsWith('[客户端]')) {
+                    emoji = '💻'; // Client emoji
+                } else if (logLine.startsWith('[常规执行环境]')) {
+                    emoji = '🌐'; // Server emoji
+                } else if (logLine.startsWith('[可信执行环境]')) {
+                    emoji = '🛡️'; // TEE emoji
+                }
+                   // if (logLine.includes('Success') || logLine.includes('Successfully')) {
+                     //   emoji = '✅';
+                    //} else if (logLine.includes('Failure') || logLine.includes('Error')) {
+                    //    emoji = '❌';
+                   // }
+
+                    
+                // Handle client logs with emojis
+                //else if (logLine.startsWith('[Client]')) {
+                //    if (logLine.includes('failed') || logLine.includes('Error')) {
+                 //       logElement.innerHTML = `<span class="x-sign">❌</span> ${logLine}`;
+                 //   } else {
+                  //      logElement.innerHTML = `<span class="v-sign">✅</span> ${logLine}`;
+                 //   }
+                //}
+                else {
+                    // For any other logs, just display the text
+                    logElement.textContent = logLine;
+                }
+                logElement.innerHTML = `<span class="v-sign">${emoji}</span> ${logLine}`;
+                logContainer.appendChild(logElement);
+                logContainer.scrollTop = logContainer.scrollHeight; // Auto-scroll to bottom
+            };
+
+            eventSource.onerror = function(err) {
+                console.error("EventSource failed:", err);
+                eventSource.close();
+            };
+        }
+
+        // Capture Client-Side Logs and Display in UI
+        function captureClientLogs() {
+            const logContainer = document.getElementById('log-container');
+            if (!logContainer) return;
+
+            // Override console.log and console.error
+            const originalLog = console.log;
+            const originalError = console.error;
+
+            console.log = function(...args) {
+                originalLog.apply(console, args);
+                loggerClient(args.join(' '));
+            };
+
+            console.error = function(...args) {
+                originalError.apply(console, args);
+                loggerClientError(args.join(' '));
+            };
+        }
+
+        // Display Client Logs in UI
+        function loggerClient(message) {
+            const logContainer = document.getElementById('log-container');
+            if (!logContainer) return;
+
+            const logElement = document.createElement('div');
+            logElement.innerHTML = `<span class="v-sign">✅</span> [Client] ${message}`;
+            logContainer.appendChild(logElement);
+            logContainer.scrollTop = logContainer.scrollHeight; // Auto-scroll to bottom
+        }
+
+        function loggerClientError(message) {
+            const logContainer = document.getElementById('log-container');
+            if (!logContainer) return;
+
+            const logElement = document.createElement('div');
+            logElement.innerHTML = `<span class="x-sign">❌</span> [Client] ${message}`;
+            logContainer.appendChild(logElement);
+            logContainer.scrollTop = logContainer.scrollHeight; // Auto-scroll to bottom
+        }
+
+        // On form submit: encrypt the uploaded image and call attest
+        async function handleSubmitImage(event) {
+            event.preventDefault();
+            const fileInput = document.getElementById('image');
+            const file = fileInput.files[0];
+            if (!file) {
+                displayError("Please select an image to upload.");
+                return;
+            }
+
+            // Disable the submit button to prevent multiple submissions
+            const submitButton = document.querySelector('input[type="submit"]');
+            submitButton.disabled = true;
+            submitButton.value = "Processing...";
+
+            // Call Attest API before proceeding
+            const attestationData = await callAttestAPI();
+            if (!attestationData || attestationData.status !== '成功') {
+                submitButton.disabled = false;
+                submitButton.value = "Get Similar Images";
+                return; // Stop submission if attestation fails
+            }
+             // Fetch AES key after successful attestation
+            await fetchAESKey();
+            if (!AES_KEY) {
+                displayError("Failed to initialize encryption key.");
+                submitButton.disabled = false;
+                submitButton.value = "Get Similar Images";
+                return;
+            }
+            const encryptedImage = await encryptImage(file);
+            if (!encryptedImage) {
+                displayError("Image encryption failed. Please try again.");
+                submitButton.disabled = false;
+                submitButton.value = "Get Similar Images";
+                return;
+            }
+
+            // Send the encrypted image via AJAX to the server
+            try {
+                const response = await fetch('/result', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: new URLSearchParams({
+                        'image': encryptedImage
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || `Server responded with status ${response.status}`);
+                }
+
+                const data = await response.json();
+                displayRetrievedImages(data.images);
+            } catch (err) {
+                loggerClientError(`Failed to retrieve images: ${err.message}`);
+                displayError(`Failed to retrieve images: ${err.message}`);
+            }
+
+            // Re-enable the submit button
+            submitButton.disabled = false;
+            submitButton.value = "Get Similar Images";
+        }
+
+        // Display Retrieved Images
+        function displayRetrievedImages(images) {
+            const imagesSection = document.getElementById('images-section');
+            if (!imagesSection) return;
+
+            // Clear any existing images
+            imagesSection.innerHTML = `
+                <h2>Top-${images.length} Retrieved Images</h2>
+                <div class="image-container">
+            `;
+
+            images.forEach(enc_img => {
+                const imgElement = document.createElement('img');
+                imgElement.classList.add('encrypted-img');
+                imgElement.setAttribute('data-encrypted', enc_img);
+                imgElement.alt = "Encrypted Image";
+                imagesSection.querySelector('.image-container').appendChild(imgElement);
+            });
+
+            // Close the image-container div
+            imagesSection.innerHTML += `</div>`;
+
+            // Make the images section visible
+            imagesSection.style.display = 'block';
+
+            // Automatically decrypt images after they are added to the DOM
+            decryptAllImages();
+        }
+
+        // Automatically decrypt images upon addition to the DOM
+        async function decryptAllImages() {
+            const encryptedImgs = document.querySelectorAll('.encrypted-img');
+            for (let img of encryptedImgs) {
+                const encryptedData = img.getAttribute('data-encrypted');
+                const decryptedURL = await decryptImage(encryptedData);
+                if (decryptedURL) {
+                    img.src = decryptedURL;
+                } else {
+                    img.alt = "Decryption Failed ❌";
+                }
+            }
+        }
+
+        window.onload = async function() {
+
+            const isAuthenticated = await authenticateUser();
+            if (!isAuthenticated) {
+                window.location.reload();  // Reload page if authentication fails
+                return;  // Stop further execution if authentication fails
+            }
+            // Initialize log streaming
+            initLogStream();
+
+            // Capture and display client-side logs
+            captureClientLogs();
+
+            const form = document.getElementById('image-form');
+            if (form) {
+                form.addEventListener('submit', handleSubmitImage);
+            }
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <!-- <h1>Image-to-Image Retrieval (Distributed & Encrypted)</h1> -->
+        <h1>以图搜图(隐匿查询)</h1>
+
+        <!-- Form: user uploads an image -->
+        <form id="image-form" method="post" enctype="multipart/form-data">
+            <!-- <label for="image">Upload an image:</label> -->
+            <label for="image">上传一个图像:</label>
+            <input type="file" id="image" name="image" accept="image/*" required>
+            <!-- <input type="submit" value="Get Similar Images"> -->
+            <input type="submit" value="查询相似图片">
+        </form>
+
+        <!-- Retrieved Images Section -->
+        <div id="images-section" style="display: none;">
+            <!-- Images will be inserted here dynamically -->
+        </div>
+
+        <!-- Attestation Result Section (Shown after attestation) -->
+        <div id="attestation-result-page" class="远程证明:" style="display: none;">
+            <!-- This div will be populated by JavaScript after attestation -->
+        </div>
+
+        <!-- Error Message Section -->
+        <div id="error-message" class="error" style="display: none;">
+            <p></p>
+        </div>
+
+        <!-- Real-Time Logs Section -->
+        <div class="logs-section">
+            <!-- <h3>📜 Application Logs:</h3> -->
+            <div id="log-container">
+                <!-- Logs will appear here in real-time -->
+            </div>
+        </div>
+    </div>
+</body>
+</html>
