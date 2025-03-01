@@ -421,12 +421,18 @@ class BertModel(BertPreTrainedModel):
     """
     def __init__(self, config):
         super(BertModel, self).__init__(config)
+        self.text_column_permutation = config.text_column_permutation
 
         self.embeddings = BertEmbeddings(config)
         self.encoder = BertEncoder(config)
         # self.pooler = BertPooler(config)
 
         self.apply(self._init_weights)
+
+        # get column permutation matrix by key
+        c_idx = 5
+        self.pc, self.ipc = torch.load('keys/key_m.pt')[c_idx], torch.load('keys/unkey_m.pt')[c_idx]
+        # self.pc, self.ipc = self.pc.cuda(), self.ipc.cuda()
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
@@ -473,12 +479,105 @@ class BertModel(BertPreTrainedModel):
             head_mask = [None] * self.config.num_hidden_layers
 
         embedding_output = self.embeddings(input_ids, position_ids=position_ids, token_type_ids=token_type_ids)
+
+        print(embedding_output.shape)
+
+        # colomn permutation
+        if self.text_column_permutation:
+            embedding_output = torch.matmul(embedding_output, self.ipc)
+
+        print(embedding_output.shape)
+
+        # above is the F1 in TEE environment 
+
+        # This encoder is the backbone in REE environment
         encoder_outputs = self.encoder(embedding_output,
                                        extended_attention_mask,
                                        head_mask=head_mask)
+        
+        # print(len(encoder_outputs)) 
+        # always len(encoder_outputs) = 1, so do not worry about encoder_outputs[1:]
+
+        # Below is the F2 in TEE environment
+
         sequence_output = encoder_outputs[0]
+
+        # colomn depermutation
+        if self.text_column_permutation:
+            sequence_output = torch.matmul(sequence_output, self.pc)
+
         # pooled_output = self.pooler(sequence_output)
         pooled_output = None
 
         outputs = (sequence_output, pooled_output,) + encoder_outputs[1:]  # add hidden_states and attentions if they are here
         return outputs  # sequence_output, pooled_output, (hidden_states), (attentions)
+
+    def F1_forward(self, input_ids, token_type_ids=None, position_ids=None):
+
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+        
+        embedding_output = self.embeddings(input_ids, position_ids=position_ids, token_type_ids=token_type_ids)
+
+        # colomn permutation
+        if self.text_column_permutation:
+            embedding_output = torch.matmul(embedding_output, self.ipc)
+
+        return embedding_output
+    
+    def Backbone_forward(self, embedding_output, attention_mask=None, inputs_ids_shape=None, token_type_ids=None, head_mask=None):
+        
+        if attention_mask is None:
+            attention_mask = torch.ones(inputs_ids_shape)
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(inputs_ids_shape)
+
+        # We create a 3D attention mask from a 2D tensor mask.
+        # Sizes are [batch_size, 1, 1, to_seq_length]
+        # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
+        # this attention mask is more simple than the triangular masking of causal attention
+        # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
+        extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+
+        # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
+        # masked positions, this operation will create a tensor which is 0.0 for
+        # positions we want to attend and -10000.0 for masked positions.
+        # Since we are adding it to the raw scores before the softmax, this is
+        # effectively the same as removing these entirely.
+        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype) # fp16 compatibility
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+
+        # Prepare head mask if needed
+        # 1.0 in head_mask indicate we keep the head
+        # attention_probs has shape bsz x n_heads x N x N
+        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
+        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+        if head_mask is not None:
+            if head_mask.dim() == 1:
+                head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+                head_mask = head_mask.expand(self.config.num_hidden_layers, -1, -1, -1, -1)
+            elif head_mask.dim() == 2:
+                head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # We can specify head_mask for each layer
+            head_mask = head_mask.to(dtype=next(self.parameters()).dtype) # switch to fload if need + fp16 compatibility
+        else:
+            head_mask = [None] * self.config.num_hidden_layers
+
+        encoder_outputs = self.encoder(embedding_output,
+                                       extended_attention_mask,
+                                       head_mask=head_mask)
+
+        sequence_output = encoder_outputs[0]
+            
+        return sequence_output
+
+    def F2_forward(self, sequence_output):
+
+        # colomn depermutation
+        if self.text_column_permutation:
+            sequence_output = torch.matmul(sequence_output, self.pc)
+
+        # pooled_output = self.pooler(sequence_output)
+        pooled_output = None
+
+        outputs = (sequence_output, pooled_output,) 
+        return outputs  # sequence_output

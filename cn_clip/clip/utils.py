@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Union, List
 import urllib
+import numpy as np
+import random
 
 import torch
 from torchvision.transforms import Compose, ToTensor, Normalize, Resize, InterpolationMode
@@ -192,3 +194,18 @@ def create_model(model_name, checkpoint=None):
             sd = {k[len('module.'):]: v for k, v in sd.items() if "bert.pooler" not in k}
         model.load_state_dict(sd)
     return model
+
+# Used by https://github.com/openai/CLIP/issues/83 but not below.
+# Keeping it incase needed.
+def convert_models_to_fp32(model):
+    for p in model.parameters():
+        p.data = p.data.float()
+        if p.grad:
+            p.grad.data = p.grad.data.float()
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)

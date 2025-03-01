@@ -67,7 +67,8 @@ class BertConfig(object):
                  layer_norm_eps=1e-12,
                  output_attentions=False,
                  output_hidden_states=False,
-                 use_flash_attention=False
+                 use_flash_attention=False,
+                 text_column_permutation=False,
                  ):
         self.vocab_size = vocab_size_or_config_json_file
         self.hidden_size = hidden_size
@@ -84,3 +85,4 @@ class BertConfig(object):
         self.output_attentions = output_attentions
         self.output_hidden_states = output_hidden_states
         self.use_flash_attention = use_flash_attention
+        self.text_column_permutation = text_column_permutation

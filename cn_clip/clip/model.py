@@ -19,6 +19,17 @@ from cn_clip.clip import _tokenizer
 from cn_clip.clip.configuration_bert import BertConfig
 from cn_clip.clip.modeling_bert import BertModel
 
+import time
+
+def getPi_Random(dim=197):
+    p = torch.eye(dim, dtype=torch.float)
+    generator = torch.Generator()
+    generator.manual_seed(int(time.time_ns()))
+    mask = torch.randperm(dim, generator = generator)
+    p = p[mask]
+    # p.shape = (H, W)
+    ip = torch.transpose(p, 0, 1)
+    return p, ip
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -225,11 +236,25 @@ class Transformer(nn.Module):
                 x = checkpoint(r, x)
             return x        
         return self.resblocks(x)
+    
+import warnings
 
+warnings.filterwarnings("ignore", message=".*torch.load.*weights_only=False.*")
 
 class VisualTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int, output_dim: int, use_flash_attention: bool = False):
+    def __init__(self, 
+                 input_resolution: int, 
+                 patch_size: int, width: int, 
+                 layers: int, 
+                 heads: int, 
+                 output_dim: int, 
+                 use_flash_attention: bool = False, 
+                 visual_row_permutation: bool = False,
+                 visual_column_permutation: bool = False,
+                 ):
         super().__init__()
+        self.visual_row_permutation = visual_row_permutation
+        self.visual_column_permutation = visual_column_permutation
         self.input_resolution = input_resolution
         self.grid_size = (self.input_resolution // patch_size, self.input_resolution // patch_size)
         self.output_dim = output_dim
@@ -245,6 +270,11 @@ class VisualTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
+        # Get column permutation matrix
+        c_idx = 5
+        self.pc, self.ipc = torch.load('keys/key_m.pt')[c_idx], torch.load('keys/unkey_m.pt')[c_idx]
+        # self.pc, self.ipc = self.pc.cuda(), self.ipc.cuda()
+        
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
         self.transformer.grad_checkpointing = enable
@@ -275,9 +305,26 @@ class VisualTransformer(nn.Module):
             x = self.random_masking(x, mask_ratio)
         x = self.ln_pre(x)
 
+        # row permutation
+        if self.visual_row_permutation:
+            # Get row permutation matrix randomly every batch
+            p, ip = getPi_Random(197)
+            # p, ip = p.to("cuda"), ip.to("cuda")
+            x = torch.matmul(p, x)
+        # column permutation
+        if self.visual_column_permutation:
+            x = torch.matmul(x, self.ipc)
+
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
+
+        # column depermuation
+        if self.visual_column_permutation:
+            x = torch.matmul(x, self.pc)
+        # row depermuation
+        if self.visual_row_permutation:
+            x = torch.matmul(ip, x)
 
         x = self.ln_post(x[:, 0, :])
 
@@ -286,6 +333,45 @@ class VisualTransformer(nn.Module):
 
         return x
 
+    def F1_forward(self, x: torch.Tensor, mask_ratio: float = 0.0):
+        x = self.conv1(x)  # shape = [*, width, grid, grid]
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+        x = x + self.positional_embedding.to(x.dtype)
+        if mask_ratio != 0:
+            x = self.random_masking(x, mask_ratio)
+        x = self.ln_pre(x)
+
+        # row permutation
+        if self.visual_row_permutation:
+            # Get row permutation matrix randomly every batch
+            p, ip = getPi_Random(197)
+            # p, ip = p.to("cuda"), ip.to("cuda")
+            x = torch.matmul(p, x)
+        # column permutation
+        if self.visual_column_permutation:
+            x = torch.matmul(x, self.ipc)
+        return x
+    
+    def Backbone_forward(self, x: torch.Tensor):
+        x = x.permute(1, 0, 2)  # NLD -> LND
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        return x
+
+    def F2_forward(self, x: torch.Tensor):
+        # column depermuation
+        if self.visual_column_permutation:
+            x = torch.matmul(x, self.pc)
+        # row depermuation
+        if self.visual_row_permutation:
+            x = torch.matmul(ip, x)
+        x = self.ln_post(x[:, 0, :])
+
+        if self.proj is not None:
+            x = x @ self.proj
+        return x
 
 class CLIP(nn.Module):
     def __init__(self,
@@ -311,6 +397,10 @@ class CLIP(nn.Module):
                  # vision head width, added this param for ViT-H
                  vision_head_width: int = 64,
                  use_flash_attention: bool = False,
+                 # Something about R&C permutation
+                 visual_row_permutation: bool = False,
+                 visual_column_permutation: bool = False,
+                 text_column_permutation: bool = False,
                  ):
         super().__init__()
 
@@ -332,7 +422,9 @@ class CLIP(nn.Module):
                 layers=vision_layers,
                 heads=vision_heads,
                 output_dim=embed_dim,
-                use_flash_attention=use_flash_attention
+                use_flash_attention=use_flash_attention,
+                visual_row_permutation=visual_row_permutation,
+                visual_column_permutation=visual_column_permutation,
             )
 
         self.bert_config = BertConfig(
@@ -348,7 +440,8 @@ class CLIP(nn.Module):
             type_vocab_size=text_type_vocab_size,
             initializer_range=text_initializer_range,
             layer_norm_eps=1e-12,
-            use_flash_attention=use_flash_attention
+            use_flash_attention=use_flash_attention,
+            text_column_permutation=text_column_permutation,
         )
         self.bert = BertModel(self.bert_config)
 
